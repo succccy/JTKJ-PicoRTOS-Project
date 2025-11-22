@@ -1,3 +1,4 @@
+// Group members: Eetu Matikkala, Miika Pernu, Akseli Östberg
 
 #include <stdio.h>
 #include <string.h>
@@ -39,20 +40,20 @@ static void btn_fxn(uint gpio, uint32_t eventMask) {
     }
 }
 
+// Collect data when programState == WAITING
 static void sensor_task(void *arg){
     (void)arg;
     for(;;){
-        // Collect data when programState == WAITING
         if(programState == WAITING) {
             float ax, ay, az, gx, gy, gz, t;
             if(ICM42670_read_sensor_data(&ax, &ay, &az, &gx, &gy, &gz, &t) == 0) {
+                // Assign all values from the sensor to an array
                 float all_IMUData[7] = {ax, ay, az, gx, gy, gz, t};
-                // Filter and normalize gyroscope absolute values
+                // Filter and normalize gyroscope absolute values into a new array
                 for(int i = 3; i < 6; i++) {
                     normal_IMUGyro[i-3] = (fabs(all_IMUData[i])) / (ICM42670_GYRO_FSR_DEFAULT);
                 }
-                // Save the last n = DATASIZE gyro values into a matrix
-                // If the last n = DATASIZE gyro values have been saved, reset saveData_it iterator to 0
+                // Save the last n = DATASIZE gyro values into a matrix, reset saveData_it iterator to 0 when filled
                 if(saveData_it < DATASIZE){
                     for(int i = 0; i < 3; i++) {
                         saved_IMUGyro[saveData_it][i] = normal_IMUGyro[i];
@@ -63,68 +64,61 @@ static void sensor_task(void *arg){
                     saveData_it = 0;
                 }
             }
-        }   
+        }
+
         // Do not remove this
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
-static void print_task(void *arg){
+// Print data when programState == DATA_READY
+static void morse_task(void *arg){
     (void)arg;
     while(1){
-        // Print data when programState = DATA_READY
         if(programState == DATA_READY) {
             float maxVal = 0;
-            int maxVal_i = 0;
-            int maxVal_j = 0;
-            printf("\n__[ Gx    Gy    Gz ]__");
-            // Loop through saved_IMUGyro
+            int maxVal_axis = 0;
+            printf("\n__[ Gx    Gy    Gz ]__"); // Debug print
+
+            // Loop through the rows of the saved gyro values matrix and check which axis has the largest value
             for(int i = 0; i < DATASIZE; i++) {
-                printf("\n__[%.2f, %.2f, %.2f]__", saved_IMUGyro[i][0], saved_IMUGyro[i][1], saved_IMUGyro[i][2]);
-                // Check which axis has the largest value
+                printf("\n__[%.2f, %.2f, %.2f]__", saved_IMUGyro[i][0], saved_IMUGyro[i][1], saved_IMUGyro[i][2]); // Debug print
                 for(int j = 0; j < 3; j++) {
                     if(saved_IMUGyro[i][j] > GYROTHRESHOLD && saved_IMUGyro[i][j] > maxVal) {
                         maxVal = saved_IMUGyro[i][j];
-                        maxVal_i = i;
-                        maxVal_j = j;
+                        maxVal_axis = j;
                     }
                 }
             }
 
-            // Check that maxVal has been given and then print dot, dash or space
+            // Check that GYROTHRESHOLD has been exceeded, label the axis and add the morse symbol to the message
             if(maxVal > GYROTHRESHOLD) {
-                // Label the detected axis
                 char *axis;
-                switch(maxVal_j) {
+                char *morSymbol;
+                switch(maxVal_axis) {
+                    // X axis - dot
                     case 0:
                         axis = "Gx";
-                        break;
-                    case 1:
-                        axis = "Gy";
-                        break;
-                    case 2:
-                        axis = "Gz";
-                        break;
-                }
-                printf("\n__LARGEST SAVED GYRO DATA OF AXIS (%s) -- ", axis);
-                // printf("\nLARGEST SAVED GYRO DATA OF AXIS (%s) -- ", axis);
-                switch(maxVal_j) {
-                    case 0:
+                        morSymbol = "[.]";
                         morseMessage[msg_index] = '.';
                         msg_index++;
-                        printf("[.]__");
                         break;
+                    // Y axis - dash
                     case 1:
+                        axis = "Gy";
+                        morSymbol = "[-]";
                         morseMessage[msg_index] = '-';
                         msg_index++;
-                        printf("[-]__");
                         break;
+                    // Z axis - space
                     case 2:
+                        axis = "Gz";
+                        morSymbol = "[SPACE]";
                         morseMessage[msg_index] = ' ';
                         msg_index++;
-                        printf("[SPACE]__");
                         break;
                 }
+                printf("\n__LARGEST SAVED GYRO DATA OF AXIS (%s) -- %s__", axis, morSymbol); // Debug print
             }
             programState = WAITING;
         }
@@ -134,14 +128,15 @@ static void print_task(void *arg){
     }
 }
 
+// Send the morse message when programState == SEND_DATA
 static void send_task(void *arg){
     (void) arg;
     while(1){
         if(programState == SEND_DATA){
-            // morseMessage[msg_index] = ' ';
-            // msg_index++;
+            // Add a newline to mark the end of the message and print the message to the serial client
             morseMessage[msg_index] = '\n';
             printf(morseMessage);
+            // Clear the message and reset the message index to 0
             for(int i = 0; i < msg_index+1; i++) {
                 morseMessage[i] = '\0';
             }
@@ -166,18 +161,19 @@ int main() {
     init_hat_sdk();
     sleep_ms(300); //Wait some time so initialization of USB and hat is done.
 
+    // Initialize and set interrupt handlers for the two buttons
     init_button1();
     init_button2();
     init_red_led();
     gpio_set_irq_enabled_with_callback(BUTTON1, GPIO_IRQ_EDGE_FALL, true, btn_fxn);
     gpio_set_irq_enabled_with_callback(BUTTON2, GPIO_IRQ_EDGE_FALL, true, btn_fxn);
 
+    // Initializing the IMU with its default values
     init_ICM42670();
     ICM42670_start_with_default_values();
 
     
-    // TaskHandle_t hSensorTask, hPrintTask, hUSB = NULL;
-    TaskHandle_t hSensorTask, hPrintTask, hSendTask, hUSB = NULL;
+    TaskHandle_t hSensorTask, hMorseTask, hSendTask = NULL;
 
     // Create the tasks with xTaskCreate
     BaseType_t result = xTaskCreate(sensor_task, // (en) Task function
@@ -191,12 +187,12 @@ int main() {
         printf("Sensor task creation failed\n");
         return 0;
     }
-    result = xTaskCreate(print_task,  // (en) Task function
-                "print",              // (en) Name of the task 
+    result = xTaskCreate(morse_task,  // (en) Task function
+                "morse",              // (en) Name of the task 
                 DEFAULT_STACK_SIZE,   // (en) Size of the stack for this task (in words). Generally 1024 or 2048
                 NULL,                 // (en) Arguments of the task 
                 2,                    // (en) Priority of this task
-                &hPrintTask);         // (en) A handle to control the execution of this task
+                &hMorseTask);         // (en) A handle to control the execution of this task
 
     if(result != pdPASS) {
         printf("Print Task creation failed\n");
